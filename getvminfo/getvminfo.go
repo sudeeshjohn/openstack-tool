@@ -25,12 +25,13 @@ import (
 
 // Config holds configuration parameters
 type Config struct {
-	Verbose      bool
-	FilterStr    string
-	OutputFormat string
-	Timeout      time.Duration
-	MaxRetries   int
-	Region       string
+	Verbose        bool
+	FilterStr      string
+	OutputFormat   string
+	Timeout        time.Duration
+	MaxRetries     int
+	MaxConcurrency int
+	UseFlavorCache bool
 }
 
 // Pair and PairList for sorting VMs by user ID
@@ -106,7 +107,7 @@ type Client struct {
 var log = logrus.New()
 
 // Run executes the VM info retrieval logic
-func Run(verbose bool, filterStr, outputFormat, region string) error {
+func Run(verbose bool, filterStr, outputFormat string, useFlavorCache bool) error {
 	log.SetOutput(os.Stdout)
 	log.SetLevel(logrus.InfoLevel)
 	if verbose {
@@ -114,19 +115,20 @@ func Run(verbose bool, filterStr, outputFormat, region string) error {
 	}
 
 	cfg := Config{
-		Verbose:      verbose,
-		FilterStr:    filterStr,
-		OutputFormat: outputFormat,
-		Timeout:      120 * time.Second,
-		MaxRetries:   3,
-		Region:       region,
+		Verbose:        verbose,
+		FilterStr:      filterStr,
+		OutputFormat:   outputFormat,
+		Timeout:        120 * time.Second,
+		MaxRetries:     3,
+		MaxConcurrency: 10,
+		UseFlavorCache: useFlavorCache,
 	}
 
-	if cfg.Region == "" {
-		cfg.Region = os.Getenv("OS_REGION_NAME")
-		if cfg.Region == "" {
-			cfg.Region = "RegionOne"
-		}
+	// Determine region
+	region := os.Getenv("OS_REGION_NAME")
+	if region == "" {
+		region = "RegionOne"
+		log.Debug("OS_REGION_NAME not set, defaulting to RegionOne")
 	}
 
 	// Validate required environment variables
@@ -147,7 +149,7 @@ func Run(verbose bool, filterStr, outputFormat, region string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
 
-	client, err := initializeClients(ctx, cfg)
+	client, err := initializeClients(ctx, cfg, region)
 	if err != nil {
 		return errors.Wrap(err, "failed to initialize clients")
 	}
@@ -183,24 +185,29 @@ func Run(verbose bool, filterStr, outputFormat, region string) error {
 		return errors.Wrap(flavorsErr, "failed to fetch flavors")
 	}
 
-	allServers, err := fetchServers(ctx, client, cfg)
-	if err != nil {
-		return errors.Wrap(err, "failed to fetch servers")
+	// Map project names to IDs for API-level filtering
+	projectIDMap := make(map[string]string)
+	for _, p := range allProjects {
+		projectIDMap[p.Name] = p.ID
+	}
+	if f.Project != "" {
+		if id, ok := projectIDMap[f.Project]; ok {
+			f.Project = id // Replace project name with ID
+		} else {
+			return fmt.Errorf("project %s not found", f.Project)
+		}
 	}
 
-	fm, err := processFlavors(ctx, client, allFlavors)
+	fm, err := processFlavors(ctx, client, allFlavors, cfg.UseFlavorCache)
 	if err != nil {
 		return errors.Wrap(err, "failed to process flavors")
 	}
 
-	vmMap, userMap, projectMap := processData(allUsers, allProjects, allServers, fm)
-
-	if err := printResults(vmMap, f, cfg.OutputFormat); err != nil {
-		return errors.Wrap(err, "failed to print results")
+	err = streamAndPrintServers(ctx, client, cfg, f, allUsers, allProjects, fm, outputFormat)
+	if err != nil {
+		return errors.Wrap(err, "failed to stream servers")
 	}
 
-	_ = userMap
-	_ = projectMap
 	return nil
 }
 
@@ -319,7 +326,7 @@ func matchesFilter(vm Vmdetails, f filter) bool {
 }
 
 // initializeClients sets up OpenStack clients
-func initializeClients(ctx context.Context, cfg Config) (*Client, error) {
+func initializeClients(ctx context.Context, cfg Config, region string) (*Client, error) {
 	ao, err := openstack.AuthOptionsFromEnv()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to load auth options from environment")
@@ -336,7 +343,7 @@ func initializeClients(ctx context.Context, cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create Identity V3 client")
 	}
-	compute, err := openstack.NewComputeV2(provider, gophercloud.EndpointOpts{Region: cfg.Region})
+	compute, err := openstack.NewComputeV2(provider, gophercloud.EndpointOpts{Region: region})
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create Compute V2 client")
 	}
@@ -391,77 +398,37 @@ func fetchFlavors(ctx context.Context, client *Client) ([]flavors.Flavor, error)
 	return allFlavors, nil
 }
 
-// fetchServers retrieves all servers with retries
-func fetchServers(ctx context.Context, client *Client, cfg Config) ([]servers.Server, error) {
+// fetchServers retrieves servers with API-level filtering
+func fetchServers(ctx context.Context, client *Client, cfg Config, f filter) ([]servers.Server, error) {
 	start := time.Now()
 	var allServers []servers.Server
-	var mu sync.Mutex   // Protect allServers
-	maxConcurrency := 5 // Adjust based on API limits
+
+	listOpts := servers.ListOpts{AllTenants: true}
+	if f.Status != "" {
+		listOpts.Status = f.Status
+	}
+	if f.Project != "" {
+		listOpts.TenantID = f.Project
+	}
 
 	for attempt := 1; attempt <= cfg.MaxRetries; attempt++ {
 		allServers = nil
-		pager := servers.List(client.Compute, servers.ListOpts{AllTenants: true})
-
-		// Collect all pages sequentially
-		var pages []pagination.Page
+		pager := servers.List(client.Compute, listOpts)
 		err := pager.EachPage(ctx, func(_ context.Context, page pagination.Page) (bool, error) {
-			pages = append(pages, page)
+			servers, err := servers.ExtractServers(page)
+			if err != nil {
+				return false, errors.Wrap(err, "failed to extract servers")
+			}
+			allServers = append(allServers, servers...)
 			return true, nil
 		})
 		if err != nil {
-			log.Warnf("Attempt %d/%d: failed to list server pages: %v", attempt, cfg.MaxRetries, err)
+			log.Warnf("Attempt %d/%d: error fetching servers: %v", attempt, cfg.MaxRetries, err)
 			if attempt == cfg.MaxRetries {
-				return nil, errors.Wrap(err, "failed to list server pages after retries")
+				return nil, errors.Wrap(err, "failed to fetch servers after retries")
 			}
 			continue
 		}
-
-		// Process pages concurrently
-		pagesChan := make(chan pagination.Page, len(pages))
-		errorsChan := make(chan error, len(pages))
-		var wg sync.WaitGroup
-
-		// Feed pages to channel
-		for _, page := range pages {
-			pagesChan <- page
-		}
-		close(pagesChan)
-
-		// Worker pool to extract servers
-		for i := 0; i < maxConcurrency; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for page := range pagesChan {
-					servers, err := servers.ExtractServers(page)
-					if err != nil {
-						errorsChan <- errors.Wrap(err, "failed to extract servers")
-						return
-					}
-					mu.Lock()
-					allServers = append(allServers, servers...)
-					mu.Unlock()
-				}
-			}()
-		}
-
-		// Wait for workers and close channels
-		go func() {
-			wg.Wait()
-			close(errorsChan)
-		}()
-
-		// Check for errors
-		for err := range errorsChan {
-			if err != nil {
-				log.Warnf("Attempt %d/%d: error processing servers: %v", attempt, cfg.MaxRetries, err)
-				if attempt == cfg.MaxRetries {
-					return nil, err
-				}
-				continue
-			}
-		}
-
 		break // Success
 	}
 
@@ -469,13 +436,44 @@ func fetchServers(ctx context.Context, client *Client, cfg Config) ([]servers.Se
 	return allServers, nil
 }
 
-// processFlavors processes flavor extra specs concurrently
-func processFlavors(ctx context.Context, client *Client, allFlavors []flavors.Flavor) (*flavorMap, error) {
+// loadFlavorCache loads flavor details from a cache file
+func loadFlavorCache(cacheFile string) (map[string]FlavorDetails, error) {
+	data, err := os.ReadFile(cacheFile)
+	if err != nil {
+		return nil, err
+	}
+	var cache map[string]FlavorDetails
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return nil, err
+	}
+	return cache, nil
+}
+
+// saveFlavorCache saves flavor details to a cache file
+func saveFlavorCache(cacheFile string, data map[string]FlavorDetails) error {
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cacheFile, bytes, 0644)
+}
+
+// processFlavors processes flavor extra specs with optional caching
+func processFlavors(ctx context.Context, client *Client, allFlavors []flavors.Flavor, useFlavorCache bool) (*flavorMap, error) {
 	start := time.Now()
 	fm := &flavorMap{data: make(map[string]FlavorDetails)}
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 10) // Increased from 5 to 10
+	cacheFile := "flavor_cache.json"
 
+	if useFlavorCache {
+		if cached, err := loadFlavorCache(cacheFile); err == nil {
+			fm.data = cached
+			log.Debugf("Loaded %d flavors from cache", len(cached))
+			return fm, nil
+		}
+	}
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 10)
 	for _, flavor := range allFlavors {
 		wg.Add(1)
 		go func(f flavors.Flavor) {
@@ -489,7 +487,11 @@ func processFlavors(ctx context.Context, client *Client, allFlavors []flavors.Fl
 			}
 			var procUnits float64
 			if procUnitStr, ok := extraSpecs["powervm:proc_units"]; ok {
-				procUnits, _ = strconv.ParseFloat(procUnitStr, 64)
+				var err error
+				procUnits, err = strconv.ParseFloat(procUnitStr, 64)
+				if err != nil {
+					log.Warnf("Invalid proc_units for flavor %s: %v", f.ID, err)
+				}
 			}
 			fm.Lock()
 			fm.data[f.ID] = FlavorDetails{
@@ -502,6 +504,13 @@ func processFlavors(ctx context.Context, client *Client, allFlavors []flavors.Fl
 	}
 	wg.Wait()
 	close(sem)
+
+	if useFlavorCache {
+		if err := saveFlavorCache(cacheFile, fm.data); err != nil {
+			log.Warnf("Failed to save flavor cache: %v", err)
+		}
+	}
+
 	log.Debugf("Processed %d flavors in %v", len(allFlavors), time.Since(start))
 	return fm, nil
 }
@@ -511,10 +520,8 @@ func processData(allUsers []users.User, allProjects []projects.Project, allServe
 	vmMap := make(map[string]Vmdetails)
 	userMap := make(map[string]UserDetails)
 	projectMap := make(map[string]ProjectDetails)
-	var mu sync.Mutex // Protect maps
-	maxWorkers := 10  // Adjust based on CPU cores
 
-	// Process users (sequential, typically small dataset)
+	// Process users sequentially
 	for _, user := range allUsers {
 		var email string
 		if e, ok := user.Extra["email"].(string); ok {
@@ -529,7 +536,7 @@ func processData(allUsers []users.User, allProjects []projects.Project, allServe
 		}
 	}
 
-	// Process projects (sequential, typically small dataset)
+	// Process projects sequentially
 	for _, project := range allProjects {
 		projectMap[project.ID] = ProjectDetails{
 			ProjectName: project.Name,
@@ -537,123 +544,154 @@ func processData(allUsers []users.User, allProjects []projects.Project, allServe
 	}
 
 	// Process servers concurrently
+	maxWorkers := 10
 	serversChan := make(chan servers.Server, len(allServers))
-	var wg sync.WaitGroup
-
-	// Feed servers to channel
+	var serverWg sync.WaitGroup
+	var mu sync.Mutex
 	for _, server := range allServers {
 		serversChan <- server
 	}
 	close(serversChan)
-
-	// Worker pool
-	for range maxWorkers {
-		wg.Add(1)
+	for i := 0; i < maxWorkers; i++ {
+		serverWg.Add(1)
 		go func() {
-			defer wg.Done()
+			defer serverWg.Done()
 			for server := range serversChan {
-				diff := time.Now().Sub(server.Created) / (24 * time.Hour)
-				flavorID, ok := server.Flavor["id"].(string)
-				if !ok {
-					log.Warnf("Flavor ID not found for server %s", server.ID)
-					continue
-				}
-				host, ok := server.Metadata["original_host"]
-				if !ok {
-					host = "Unknown"
-				}
-				var ipAddresses []string
-				for _, addresses := range server.Addresses {
-					addrList, ok := addresses.([]interface{})
-					if !ok {
-						log.Warnf("Invalid address format for server %s", server.ID)
-						continue
-					}
-					for _, addr := range addrList {
-						addrMap, ok := addr.(map[string]interface{})
-						if !ok {
-							continue
-						}
-						ip, ok := addrMap["addr"].(string)
-						if ok && ip != "" {
-							ipAddresses = append(ipAddresses, ip)
-						}
-					}
-				}
-				ipStr := strings.Join(ipAddresses, ",")
-				if ipStr == "" {
-					ipStr = "None"
-				}
-				fm.RLock()
-				flavor := fm.data[flavorID]
-				fm.RUnlock()
-				vmDetails := Vmdetails{
-					VmName:       server.Name,
-					Project:      projectMap[server.TenantID].ProjectName,
-					CreationTime: server.Created,
-					NumberOfDays: int(diff),
-					UserID:       server.UserID,
-					UserEmail:    userMap[server.UserID].UserEmail,
-					VmStatus:     server.Status,
-					VmMemory:     flavor.Memory,
-					VmVcpu:       flavor.Vcpus,
-					VmProcUnit:   flavor.ProcUnits,
-					VmHost:       host,
-					IPAddresses:  ipStr,
-				}
+				vm := processServer(server, fm, userMap, projectMap)
 				mu.Lock()
-				vmMap[server.ID] = vmDetails
+				vmMap[server.ID] = vm
 				mu.Unlock()
 			}
 		}()
 	}
-	wg.Wait()
+	serverWg.Wait()
 
 	return vmMap, userMap, projectMap
 }
 
-// printResults outputs the results in the specified format
-func printResults(vmMap map[string]Vmdetails, f filter, outputFormat string) error {
-	start := time.Now()
-	var filteredVMs []Vmdetails
-	p := make(PairList, 0, len(vmMap))
-	for k, v := range vmMap {
-		if matchesFilter(v, f) {
-			p = append(p, Pair{k, v.UserID})
-			filteredVMs = append(filteredVMs, v)
+// processServer processes a single server into Vmdetails
+func processServer(server servers.Server, fm *flavorMap, userMap map[string]UserDetails, projectMap map[string]ProjectDetails) Vmdetails {
+	diff := time.Now().Sub(server.Created) / (24 * time.Hour)
+	flavorID, ok := server.Flavor["id"].(string)
+	if !ok {
+		log.Warnf("Flavor ID not found for server %s", server.ID)
+	}
+	host, ok := server.Metadata["original_host"]
+	if !ok {
+		host = "Unknown"
+	}
+	var ipAddresses []string
+	for _, addresses := range server.Addresses {
+		addrList, ok := addresses.([]interface{})
+		if !ok {
+			log.Warnf("Invalid address format for server %s", server.ID)
+			continue
+		}
+		for _, addr := range addrList {
+			addrMap, ok := addr.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			ip, ok := addrMap["addr"].(string)
+			if ok && ip != "" {
+				ipAddresses = append(ipAddresses, ip)
+			}
 		}
 	}
-	sort.Sort(p)
-	log.Debugf("Sorted %d VMs in %v", len(p), time.Since(start))
+	ipStr := strings.Join(ipAddresses, ",")
+	if ipStr == "" {
+		ipStr = "None"
+	}
+	fm.RLock()
+	flavor := fm.data[flavorID]
+	fm.RUnlock()
+	return Vmdetails{
+		VmName:       server.Name,
+		Project:      projectMap[server.TenantID].ProjectName,
+		CreationTime: server.Created,
+		NumberOfDays: int(diff),
+		UserID:       server.UserID,
+		UserEmail:    userMap[server.UserID].UserEmail,
+		VmStatus:     server.Status,
+		VmMemory:     flavor.Memory,
+		VmVcpu:       flavor.Vcpus,
+		VmProcUnit:   flavor.ProcUnits,
+		VmHost:       host,
+		IPAddresses:  ipStr,
+	}
+}
 
-	if len(filteredVMs) == 0 {
-		fmt.Println("No VMs match the specified filters.")
-		return nil
+// streamAndPrintServers processes servers and prints results
+func streamAndPrintServers(ctx context.Context, client *Client, cfg Config, f filter, allUsers []users.User, allProjects []projects.Project, fm *flavorMap, outputFormat string) error {
+	start := time.Now()
+	userMap := make(map[string]UserDetails)
+	projectMap := make(map[string]ProjectDetails)
+	for _, user := range allUsers {
+		var email string
+		if e, ok := user.Extra["email"].(string); ok {
+			email = e
+		}
+		userMap[user.ID] = UserDetails{UserName: user.Name, UserEmail: email}
+	}
+	for _, project := range allProjects {
+		projectMap[project.ID] = ProjectDetails{ProjectName: project.Name}
 	}
 
+	allServers, err := fetchServers(ctx, client, cfg, f)
+	if err != nil {
+		return errors.Wrap(err, "failed to fetch servers")
+	}
+
+	var vmCount int
+	writer := tabwriter.NewWriter(os.Stdout, 0, 1, 2, ' ', tabwriter.TabIndent)
+	var jsonVMs []Vmdetails
+	var pairs PairList
+
 	fmt.Println("##############")
-	switch strings.ToLower(outputFormat) {
-	case "json":
-		data, err := json.MarshalIndent(filteredVMs, "", "  ")
+	if strings.ToLower(outputFormat) == "table" {
+		fmt.Fprintln(writer, "VM_NAME\tUSER_EMAIL\tUP_FOR_DAYS\tPROJECT\tSTATUS\tMEMORY\tVCPUs\tPROC_UNIT\tHOST\tIP_ADDRESSES\t")
+	}
+
+	for i, server := range allServers {
+		vm := processServer(server, fm, userMap, projectMap)
+		if matchesFilter(vm, f) {
+			vmCount++
+			if strings.ToLower(outputFormat) == "table" {
+				fmt.Fprintf(writer, "%v\t%v\t%v\t%v\t%v\t%v\t%v\t%v\t%v\t%v\t\n",
+					vm.VmName, vm.UserEmail, vm.NumberOfDays, vm.Project, vm.VmStatus,
+					vm.VmMemory, vm.VmVcpu, vm.VmProcUnit, vm.VmHost, vm.IPAddresses)
+			} else {
+				jsonVMs = append(jsonVMs, vm)
+				pairs = append(pairs, Pair{Key: strconv.Itoa(i), Value: vm.UserID})
+			}
+		}
+	}
+
+	if strings.ToLower(outputFormat) == "table" {
+		writer.Flush()
+	} else if len(jsonVMs) > 0 {
+		sort.Sort(pairs)
+		sortedVMs := make([]Vmdetails, len(jsonVMs))
+		for i, pair := range pairs {
+			index, err := strconv.Atoi(pair.Key)
+			if err != nil {
+				log.Warnf("Failed to parse index %s: %v", pair.Key, err)
+				continue
+			}
+			sortedVMs[i] = jsonVMs[index]
+		}
+		data, err := json.MarshalIndent(sortedVMs, "", "  ")
 		if err != nil {
 			return errors.Wrap(err, "failed to marshal JSON")
 		}
 		fmt.Println(string(data))
-	case "table":
-		writer := tabwriter.NewWriter(os.Stdout, 0, 1, 2, ' ', tabwriter.TabIndent)
-		fmt.Fprintln(writer, "VM_NAME\tUSER_EMAIL\tUP_FOR_DAYS\tPROJECT\tSTATUS\tMEMORY\tVCPUs\tPROC_UNIT\tHOST\tIP_ADDRESSES\t")
-		for _, pair := range p {
-			vm := vmMap[pair.Key]
-			fmt.Fprintf(writer, "%v\t%v\t%v\t%v\t%v\t%v\t%v\t%v\t%v\t%v\t\n",
-				vm.VmName, vm.UserEmail, vm.NumberOfDays, vm.Project, vm.VmStatus,
-				vm.VmMemory, vm.VmVcpu, vm.VmProcUnit, vm.VmHost, vm.IPAddresses)
-		}
-		writer.Flush()
-	default:
-		return fmt.Errorf("unsupported output format: %s", outputFormat)
+	} else {
+		fmt.Println("No VMs match the specified filters.")
 	}
+
 	fmt.Println("##############")
-	fmt.Printf("Number of VMs: %d\n", len(filteredVMs))
+	fmt.Printf("Number of VMs: %d\n", vmCount)
 	fmt.Println("##############")
+	log.Debugf("Processed and printed %d VMs in %v", vmCount, time.Since(start))
 	return nil
 }
