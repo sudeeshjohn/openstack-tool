@@ -1,35 +1,64 @@
-# Simple Makefile for openstack-tool
-
-BINARY_NAME = openstack-tool
-GO = go
-
-.PHONY: all build run-get-vminfo run-cleanup-vms clean tidy help
+.PHONY: all build test fmt lint run run-get-vminfo run-clean-nova-stale-vms run-user-roles run-manage-vms run-volume run-volume-list run-images run-images-list run-storage run-storage-vol-list clean install-lint deps
 
 all: build
 
-build:
-	$(GO) build -o $(BINARY_NAME) .
+build: deps
+	go build -o openstack-tool . || { echo "Build failed"; exit 1; }
+
+deps:
+	go mod tidy
+	go mod verify
+
+test:
+	go test -v -coverprofile=coverage.out ./... || { echo "Tests failed"; exit 1; }
+	go tool cover -html=coverage.out -o coverage.html
+
+fmt:
+	gofmt -w getvminfo/*.go cleannovastalevms/*.go user/*.go auth/*.go managevms/*.go util/*.go volume/*.go images/*.go storage/*.go main.go
+
+install-lint:
+	@command -v golangci-lint >/dev/null 2>&1 || { \
+		echo "Installing golangci-lint v1.61.0..."; \
+		curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.61.0; \
+	}
+
+lint: install-lint
+	golangci-lint run ./...
+
+run: build
+	./openstack-tool
 
 run-get-vminfo: build
-	./$(BINARY_NAME) -mode=get-vminfo -v -filter="status=ACTIVE" -output=table
+	./openstack-tool vm info --verbose --filter="host=host1,status=ACTIVE,days>7" --output=table --timeout=300
 
-run-cleanup-vms: build
-	./$(BINARY_NAME) -mode=cleanup-vms -u=root -p=secret -i=192.168.1.100 -dry-run
+run-clean-nova-stale-vms: build
+	./openstack-tool clean-nova-stale-vms --user=root --password=secret --ip=192.168.1.100 --dry-run --output=table --timeout=300
+
+run-user-roles: build
+	./openstack-tool user-roles --verbose --action=list-users-in-project --project=admin --output=table --timeout=300
+
+run-manage-vms: build
+	./openstack-tool vm manage delete --verbose --vm=test-vm1,test-vm2 --project=admin --dry-run --output=table --timeout=300
+
+run-volume: build
+	./openstack-tool volume --verbose --action=list-all --output=table --timeout=300
+
+run-volume-list: build
+	./openstack-tool volume --verbose --action=list --project=proj1 --output=table --timeout=300
+
+run-images: build
+	./openstack-tool images --verbose --action=list-all --output=table --timeout=300
+
+run-images-list: build
+	./openstack-tool images --verbose --action=list --project=proj1 --output=table --timeout=300
+
+run-storage: build
+	./openstack-tool storage vol list --verbose --ip=192.168.1.100 --username=admin --password=secret --timeout=300
+
+run-storage-vol-list: build
+	./openstack-tool storage vol list --verbose --ip=192.168.1.100 --username=admin --password=secret --long --timeout=300
 
 clean:
-	rm -f $(BINARY_NAME)
-	$(GO) clean
-
-tidy:
-	$(GO) mod tidy
-
-help:
-	@echo "Makefile for $(BINARY_NAME)"
-	@echo "Targets:"
-	@echo "  all               Build the binary"
-	@echo "  build             Build the $(BINARY_NAME) binary"
-	@echo "  run-get-vminfo    Run in get-vminfo mode"
-	@echo "  run-cleanup-vms   Run in cleanup-vms mode (dry-run)"
-	@echo "  clean             Remove binary and build artifacts"
-	@echo "  tidy              Tidy go.mod and go.sum"
-	@echo "  help              Show this help"
+	rm -f openstack-tool
+	rm -f flavor_cache.json
+	rm -f coverage.out coverage.html
