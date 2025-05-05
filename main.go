@@ -7,95 +7,72 @@ import (
 
 	"github.com/sudeeshjohn/openstack-tool/cleanupvms"
 	"github.com/sudeeshjohn/openstack-tool/getvminfo"
+	"github.com/sudeeshjohn/openstack-tool/user"
 )
 
 func main() {
+	// Define subcommands
+	getVMInfoCmd := flag.NewFlagSet("get-vminfo", flag.ExitOnError)
+	verbose := getVMInfoCmd.Bool("v", false, "Enable verbose logging")
+	filter := getVMInfoCmd.String("filter", "", "Filter VMs (e.g., host=host1,email=user@example.com)")
+	output := getVMInfoCmd.String("output", "table", "Output format (table or json)")
+	useFlavorCache := getVMInfoCmd.Bool("use-flavor-cache", false, "Use flavor cache")
+
+	cleanupCmd := flag.NewFlagSet("cleanup-vms", flag.ExitOnError)
+	userFlag := cleanupCmd.String("u", "", "SSH username")
+	passFlag := cleanupCmd.String("p", "", "SSH password")
+	ipFlag := cleanupCmd.String("i", "", "Hypervisor IP address")
+	dryRun := cleanupCmd.Bool("dry-run", false, "Perform a dry run without deleting VMs")
+
+	userRolesCmd := flag.NewFlagSet("user-roles", flag.ExitOnError)
+	userVerbose := userRolesCmd.Bool("v", false, "Enable verbose logging")
+	userOutput := userRolesCmd.String("output", "table", "Output format (table or json)")
+	userAction := userRolesCmd.String("action", "list", "Action to perform (list, assign, remove, list-roles, list-users-by-role, list-user-roles-all-projects, list-users-in-project)")
+	userName := userRolesCmd.String("user-name", "", "User name")
+	projectName := userRolesCmd.String("project-name", "", "Project name")
+	roleName := userRolesCmd.String("role-name", "", "Role name")
+
+	// Check if a subcommand is provided
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Error: a subcommand is required (get-vminfo or cleanup-vms)")
-		printUsage()
+		fmt.Println("Expected 'get-vminfo', 'cleanup-vms', or 'user-roles' subcommands")
+		fmt.Println("Usage:")
+		fmt.Println("  get-vminfo [-v] [-filter=<filter>] [-output=<table|json>] [-use-flavor-cache]")
+		fmt.Println("  cleanup-vms -u=<username> -p=<password> -i=<ip> [-dry-run]")
+		fmt.Println("  user-roles [-v] [-output=<table|json>] [-action=<list|assign|remove|list-roles|list-users-by-role|list-user-roles-all-projects|list-users-in-project>] [-user-name=<name>] [-project-name=<name>] [-role-name=<name>]")
 		os.Exit(1)
 	}
 
-	subcommand := os.Args[1]
-	args := os.Args[2:]
-
-	switch subcommand {
+	// Parse the subcommand
+	switch os.Args[1] {
 	case "get-vminfo":
-		handleGetVMInfo(args)
+		getVMInfoCmd.Parse(os.Args[2:])
+		if err := getvminfo.Run(*verbose, *filter, *output, *useFlavorCache); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	case "cleanup-vms":
-		handleCleanupVMs(args)
+		cleanupCmd.Parse(os.Args[2:])
+		if *userFlag == "" || *passFlag == "" || *ipFlag == "" {
+			fmt.Println("Error: -u, -p, and -i flags are required for cleanup-vms")
+			cleanupCmd.Usage()
+			os.Exit(1)
+		}
+		if err := cleanupvms.Run(*userFlag, *passFlag, *ipFlag, *dryRun); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	case "user-roles":
+		userRolesCmd.Parse(os.Args[2:])
+		if err := user.Run(*userVerbose, *userOutput, *userAction, *userName, *projectName, *roleName); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "Error: unknown subcommand %q; must be 'get-vminfo' or 'cleanup-vms'\n", subcommand)
-		printUsage()
-		os.Exit(1)
-	}
-}
-
-func printUsage() {
-	fmt.Fprintf(os.Stderr, "Usage: %s <subcommand> [flags]\n\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "A tool to manage OpenStack VMs. Select a subcommand.\n\n")
-	fmt.Fprintf(os.Stderr, "Subcommands:\n")
-	fmt.Fprintf(os.Stderr, "  get-vminfo     Fetch and display VM information\n")
-	fmt.Fprintf(os.Stderr, "  cleanup-vms    Clean up abandoned VMs on a NovaLink host\n")
-	fmt.Fprintf(os.Stderr, "\nRun '%s <subcommand> -h' for subcommand-specific help.\n", os.Args[0])
-}
-
-func handleGetVMInfo(args []string) {
-	fs := flag.NewFlagSet("get-vminfo", flag.ExitOnError)
-	verbose := fs.Bool("v", false, "Enable verbose debug output")
-	filterStr := fs.String("filter", "", "Filter VMs by host, email, status, project, or days (e.g., 'host=host1,email=user@example.com,status=ACTIVE,project=proj1,days>30')")
-	outputFormat := fs.String("output", "table", "Output format: table, json")
-	useFlavorCache := fs.Bool("use-flavor-cache", true, "Use flavor caching")
-
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s get-vminfo [flags]\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "Fetch and display VM information.\n\n")
-		fmt.Fprintf(os.Stderr, "Required environment variables: OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_PROJECT_NAME, OS_DOMAIN_NAME\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nExample: %s get-vminfo -v -filter=\"host=host1,status=ACTIVE,days>7\" -output=table -use-flavor-cache=false\n", os.Args[0])
-	}
-
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := getvminfo.Run(*verbose, *filterStr, *outputFormat, *useFlavorCache); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-}
-
-func handleCleanupVMs(args []string) {
-	fs := flag.NewFlagSet("cleanup-vms", flag.ExitOnError)
-	user := fs.String("u", "root", "Username for SSH (default: root)")
-	password := fs.String("p", "", "Password for SSH")
-	ip := fs.String("i", "", "IP of the NovaLink host")
-	dryRun := fs.Bool("dry-run", false, "Only show VMs that would be deleted, without deleting")
-
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s cleanup-vms [flags]\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "Clean up abandoned VMs on a NovaLink host.\n\n")
-		fmt.Fprintf(os.Stderr, "Required environment variables: OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_PROJECT_NAME, OS_DOMAIN_NAME, OS_REGION_NAME\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fs.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nExample: %s cleanup-vms -u=root -p=secret -i=192.168.1.100 -dry-run\n", os.Args[0])
-	}
-
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
-		os.Exit(1)
-	}
-
-	if *ip == "" {
-		fmt.Fprintln(os.Stderr, "Error: -i (NovaLink host IP) is required")
-		fs.Usage()
-		os.Exit(1)
-	}
-
-	if err := cleanupvms.Run(*user, *password, *ip, *dryRun); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Println("Expected 'get-vminfo', 'cleanup-vms', or 'user-roles' subcommands")
+		fmt.Println("Usage:")
+		fmt.Println("  get-vminfo [-v] [-filter=<filter>] [-output=<table|json>] [-use-flavor-cache]")
+		fmt.Println("  cleanup-vms -u=<username> -p=<password> -i=<ip> [-dry-run]")
+		fmt.Println("  user-roles [-v] [-output=<table|json>] [-action=<list|assign|remove|list-roles|list-users-by-role|list-user-roles-all-projects|list-users-in-project>] [-user-name=<name>] [-project-name=<name>] [-role-name=<name>]")
 		os.Exit(1)
 	}
 }
