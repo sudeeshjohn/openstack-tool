@@ -32,6 +32,7 @@ type Config struct {
 
 // RoleDetails defines the role details structure
 type RoleDetails struct {
+	UserName    string // Added for list-user-roles-all-projects
 	RoleName    string
 	RoleID      string
 	ProjectName string
@@ -280,6 +281,7 @@ func listUserRoles(ctx context.Context, client *Client, cfg Config) error {
 			}
 			mu.Lock()
 			roleDetails = append(roleDetails, RoleDetails{
+				UserName:    cfg.UserName, // Include username
 				RoleName:    role.Name,
 				RoleID:      role.ID,
 				ProjectName: cfg.ProjectName,
@@ -411,6 +413,7 @@ func listUserRolesAllProjects(ctx context.Context, client *Client, cfg Config) e
 			}
 			mu.Lock()
 			roleDetails = append(roleDetails, RoleDetails{
+				UserName:    cfg.UserName, // Include username
 				RoleName:    role.Name,
 				RoleID:      role.ID,
 				ProjectName: projectName,
@@ -452,7 +455,15 @@ func listUsersInProject(ctx context.Context, client *Client, cfg Config) error {
 			if _, exists := userMap[assignment.User.ID]; !exists {
 				user, err := users.Get(ctx, client.Identity, assignment.User.ID).Extract()
 				if err != nil {
-					log.Warnf("Failed to get user %s: %v", assignment.User.ID, err)
+					// Attempt to get role name for context
+					roleName := "unknown"
+					if assignment.Role.ID != "" {
+						role, roleErr := roles.Get(ctx, client.Identity, assignment.Role.ID).Extract()
+						if roleErr == nil {
+							roleName = role.Name
+						}
+					}
+					log.Warnf("Failed to get user %s for role %s: %v", assignment.User.ID, roleName, err)
 					continue
 				}
 				email := ""
@@ -542,10 +553,10 @@ func printRoles(roleDetails []RoleDetails, outputFormat string) error {
 
 	if strings.ToLower(outputFormat) == "table" {
 		writer := tabwriter.NewWriter(os.Stdout, 0, 1, 2, ' ', tabwriter.TabIndent)
-		fmt.Fprintln(writer, "ROLE_NAME\tROLE_ID\tPROJECT_NAME\t")
+		fmt.Fprintln(writer, "USER_NAME\tROLE_NAME\tROLE_ID\tPROJECT_NAME\t")
 		fmt.Println("##############")
 		for _, role := range roleDetails {
-			fmt.Fprintf(writer, "%s\t%s\t%s\t\n", role.RoleName, role.RoleID, role.ProjectName)
+			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t\n", role.UserName, role.RoleName, role.RoleID, role.ProjectName)
 		}
 		writer.Flush()
 		fmt.Println("##############")
