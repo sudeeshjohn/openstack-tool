@@ -118,7 +118,7 @@ func Run(verbose bool, filterStr, outputFormat string, useFlavorCache bool) erro
 		Verbose:        verbose,
 		FilterStr:      filterStr,
 		OutputFormat:   outputFormat,
-		Timeout:        120 * time.Second,
+		Timeout:        300 * time.Second, // Increased from 120s to 300s
 		MaxRetries:     3,
 		MaxConcurrency: 10,
 		UseFlavorCache: useFlavorCache,
@@ -442,11 +442,12 @@ func loadFlavorCache(cacheFile string) (map[string]FlavorDetails, error) {
 	if err != nil {
 		return nil, err
 	}
-	var cache map[string]FlavorDetails
-	if err := json.Unmarshal(data, &cache); err != nil {
+	var flavors map[string]FlavorDetails
+	if err := json.Unmarshal(data, &flavors); err != nil {
 		return nil, err
 	}
-	return cache, nil
+	log.Debugf("Loaded %d flavors from cache", len(flavors))
+	return flavors, nil
 }
 
 // saveFlavorCache saves flavor details to a cache file
@@ -464,6 +465,7 @@ func processFlavors(ctx context.Context, client *Client, allFlavors []flavors.Fl
 	fm := &flavorMap{data: make(map[string]FlavorDetails)}
 	cacheFile := "flavor_cache.json"
 
+	// Try loading from cache
 	if useFlavorCache {
 		if cached, err := loadFlavorCache(cacheFile); err == nil {
 			fm.data = cached
@@ -505,9 +507,12 @@ func processFlavors(ctx context.Context, client *Client, allFlavors []flavors.Fl
 	wg.Wait()
 	close(sem)
 
+	// Save to cache if enabled
 	if useFlavorCache {
 		if err := saveFlavorCache(cacheFile, fm.data); err != nil {
 			log.Warnf("Failed to save flavor cache: %v", err)
+		} else {
+			log.Debugf("Saved %d flavors to cache", len(fm.data))
 		}
 	}
 
