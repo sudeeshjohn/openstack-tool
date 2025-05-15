@@ -227,7 +227,7 @@ func fetchRemoteVMListSSH(user, password, ip string) ([]VM, error) {
 	cmd := "export TERM=xterm; pvmctl vm list --display-fields LogicalPartition.name LogicalPartition.state | awk '!/ltc.*-nova/'"
 	output, err := session.Output(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("command failed: %v", err)
+		return nil, fmt.Errorf("command failed: %v - output: %s", err, output)
 	}
 	var remoteVMs []VM
 	for _, line := range strings.Split(string(output), "\n") {
@@ -259,7 +259,7 @@ func findMissingVms(vmInstances []InstanceInfo, remoteVMs []VM) []InstanceInfo {
 	for _, remoteVM := range remoteVMs {
 		found := false
 		for _, instance := range vmInstances {
-			if instance.InstanceName == remoteVM.Name {
+			if strings.EqualFold(instance.InstanceName, remoteVM.Name) {
 				found = true
 				break
 			}
@@ -287,7 +287,7 @@ func deleteAbandonedVMs(user, password, ip string, abandonedVMs []InstanceInfo, 
 		}
 		return
 	}
-	fmt.Printf("⚠️ Do you want to delete %d VMs? (yes/no): ", len(abandonedVMs))
+	fmt.Printf("Type 'delete' to confirm deletion of %d VMs: ", len(abandonedVMs))
 	var response string
 	fmt.Scanln(&response)
 	if strings.ToLower(response) != "yes" {
@@ -313,13 +313,13 @@ func deleteAbandonedVMs(user, password, ip string, abandonedVMs []InstanceInfo, 
 			fmt.Printf("❌ SSH session failed for %s: %v\n", vm.InstanceName, err)
 			continue
 		}
-		defer session.Close()
 		cmd := fmt.Sprintf("pvmctl LogicalPartition delete --object-id name=%s", vm.InstanceName)
 		output, err := session.CombinedOutput(cmd)
+		session.Close()
 		if err != nil {
 			fmt.Printf("❌ Failed to delete VM %s (Tenant: %s): %v, Output: %s\n", vm.InstanceName, vm.TenantName, err, output)
 		} else {
-			fmt.Printf("✅ VM %s (Tenant: %s) deleted successfully!\n", vm.InstanceName, vm.TenantName)
+			fmt.Printf(" - VM: %s, Tenant: %s, Status: %s → Command: pvmctl LogicalPartition delete --object-id name=%s\n", vm.InstanceName, vm.TenantName, vm.Status, vm.InstanceName)
 		}
 	}
 }

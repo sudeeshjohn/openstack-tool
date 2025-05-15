@@ -481,10 +481,12 @@ func listUsersInProject(ctx context.Context, client *Client, cfg Config) error {
 		}
 	}
 
-	// Convert map to slice for output
-	for _, user := range userMap {
-		userDetails = append(userDetails, user)
+	// Convert map to slice
+	mu.Lock()
+	for _, u := range userMap {
+		userDetails = append(userDetails, u)
 	}
+	mu.Unlock()
 
 	log.Debugf("Fetched %d users in %v", len(userDetails), time.Since(start))
 	return printUsers(userDetails, cfg.OutputFormat)
