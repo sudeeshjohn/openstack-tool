@@ -10,13 +10,12 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/gophercloud/gophercloud/v2"
-	"github.com/gophercloud/gophercloud/v2/openstack"
 	"github.com/gophercloud/gophercloud/v2/openstack/identity/v3/projects"
 	"github.com/gophercloud/gophercloud/v2/openstack/identity/v3/roles"
 	"github.com/gophercloud/gophercloud/v2/openstack/identity/v3/users"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"github.com/sudeeshjohn/openstack-tool/auth"
 )
 
 // Config holds configuration parameters
@@ -24,7 +23,7 @@ type Config struct {
 	Verbose      bool
 	OutputFormat string
 	Timeout      time.Duration
-	Action       string // list, assign, remove, list-roles, list-users-by-role, list-user-roles-all-projects, list-users-in-project
+	Action       string
 	UserName     string
 	ProjectName  string
 	RoleName     string
@@ -32,7 +31,7 @@ type Config struct {
 
 // RoleDetails defines the role details structure
 type RoleDetails struct {
-	UserName    string // Added for list-user-roles-all-projects
+	UserName    string
 	RoleName    string
 	RoleID      string
 	ProjectName string
@@ -45,16 +44,11 @@ type UserDetails struct {
 	Email    string
 }
 
-// Client holds OpenStack clients
-type Client struct {
-	Identity *gophercloud.ServiceClient
-}
-
 // Logger for structured logging
 var log = logrus.New()
 
 // Run executes the user role management logic
-func Run(verbose bool, outputFormat, action, userName, projectName, roleName string) error {
+func Run(ctx context.Context, client *auth.Client, verbose bool, outputFormat, action, userName, projectName, roleName string) error {
 	log.SetOutput(os.Stdout)
 	log.SetLevel(logrus.InfoLevel)
 	if verbose {
@@ -77,28 +71,9 @@ func Run(verbose bool, outputFormat, action, userName, projectName, roleName str
 		return fmt.Errorf("invalid action: %s; valid options: %v", cfg.Action, validActions)
 	}
 
-	// Determine region
-	region := os.Getenv("OS_REGION_NAME")
-	if region == "" {
-		region = "RegionOne"
-		log.Debug("OS_REGION_NAME not set, defaulting to RegionOne")
-	}
-
-	// Validate required environment variables
-	requiredEnv := []string{"OS_AUTH_URL", "OS_USERNAME", "OS_PASSWORD", "OS_PROJECT_NAME", "OS_DOMAIN_NAME"}
-	for _, env := range requiredEnv {
-		if os.Getenv(env) == "" {
-			return fmt.Errorf("missing required environment variable: %s", env)
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+	// Use context with timeout
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
-
-	client, err := initializeClients(ctx, region)
-	if err != nil {
-		return errors.Wrap(err, "failed to initialize clients")
-	}
 
 	switch cfg.Action {
 	case "list":
@@ -148,31 +123,8 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-// initializeClients sets up OpenStack clients
-func initializeClients(ctx context.Context, region string) (*Client, error) {
-	ao, err := openstack.AuthOptionsFromEnv()
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to load auth options from environment")
-	}
-	log.Debugf("Auth options loaded: IdentityEndpoint=%s", ao.IdentityEndpoint)
-
-	provider, err := openstack.AuthenticatedClient(ctx, ao)
-	if err != nil {
-		return nil, errors.Wrap(err, "authentication failed")
-	}
-	log.Debug("Authenticated successfully")
-
-	identity, err := openstack.NewIdentityV3(provider, gophercloud.EndpointOpts{})
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create Identity V3 client")
-	}
-	log.Debug("Identity client initialized")
-
-	return &Client{Identity: identity}, nil
-}
-
 // getUserID retrieves the user ID by username
-func getUserID(ctx context.Context, client *Client, username string) (string, error) {
+func getUserID(ctx context.Context, client *auth.Client, username string) (string, error) {
 	listOpts := users.ListOpts{Name: username}
 	userPages, err := users.List(client.Identity, listOpts).AllPages(ctx)
 	if err != nil {
@@ -192,7 +144,7 @@ func getUserID(ctx context.Context, client *Client, username string) (string, er
 }
 
 // getProjectID retrieves the project ID by project name
-func getProjectID(ctx context.Context, client *Client, projectName string) (string, error) {
+func getProjectID(ctx context.Context, client *auth.Client, projectName string) (string, error) {
 	listOpts := projects.ListOpts{Name: projectName}
 	projectPages, err := projects.List(client.Identity, listOpts).AllPages(ctx)
 	if err != nil {
@@ -212,7 +164,7 @@ func getProjectID(ctx context.Context, client *Client, projectName string) (stri
 }
 
 // getProjectName retrieves the project name by project ID
-func getProjectName(ctx context.Context, client *Client, projectID string) (string, error) {
+func getProjectName(ctx context.Context, client *auth.Client, projectID string) (string, error) {
 	project, err := projects.Get(ctx, client.Identity, projectID).Extract()
 	if err != nil {
 		return "", errors.Wrap(err, "failed to get project")
@@ -221,7 +173,7 @@ func getProjectName(ctx context.Context, client *Client, projectID string) (stri
 }
 
 // getRoleID retrieves the role ID by role name
-func getRoleID(ctx context.Context, client *Client, roleName string) (string, error) {
+func getRoleID(ctx context.Context, client *auth.Client, roleName string) (string, error) {
 	listOpts := roles.ListOpts{Name: roleName}
 	rolePages, err := roles.List(client.Identity, listOpts).AllPages(ctx)
 	if err != nil {

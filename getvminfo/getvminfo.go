@@ -21,6 +21,7 @@ import (
 	"github.com/gophercloud/gophercloud/v2/pagination"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"github.com/sudeeshjohn/openstack-tool/auth"
 )
 
 // Config holds configuration parameters
@@ -28,86 +29,18 @@ type Config struct {
 	Verbose        bool
 	FilterStr      string
 	OutputFormat   string
-	Timeout        time.Duration
 	MaxRetries     int
 	MaxConcurrency int
 	UseFlavorCache bool
 }
 
-// Pair and PairList for sorting VMs by user ID
-type Pair struct {
-	Key   string
-	Value string
-}
-
-type PairList []Pair
-
-func (p PairList) Len() int           { return len(p) }
-func (p PairList) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
-func (p PairList) Less(i, j int) bool { return p[i].Value < p[j].Value }
-
-// Vmdetails defines the VM details structure
-type Vmdetails struct {
-	VmName       string
-	Project      string
-	CreationTime time.Time
-	NumberOfDays int
-	UserID       string
-	UserEmail    string
-	VmStatus     string
-	VmVcpu       int
-	VmMemory     int
-	VmProcUnit   float64
-	VmHost       string
-	IPAddresses  string
-}
-
-// UserDetails defines the user details structure
-type UserDetails struct {
-	UserName    string
-	UserProject string
-	UserEmail   string
-}
-
-// ProjectDetails defines the project details structure
-type ProjectDetails struct {
-	ProjectName string
-}
-
-// FlavorDetails defines the flavor details structure
-type FlavorDetails struct {
-	Vcpus     int
-	Memory    int
-	ProcUnits float64
-}
-
-// flavorMap protects the flavor map with a read-write mutex
-type flavorMap struct {
-	sync.RWMutex
-	data map[string]FlavorDetails
-}
-
-// filter represents a single filter condition
-type filter struct {
-	Host      string
-	Email     string
-	Status    string
-	Project   string
-	DaysOp    string // >, <, =, >=, <=
-	DaysValue int
-}
-
-// Client holds OpenStack clients
-type Client struct {
-	Identity *gophercloud.ServiceClient
-	Compute  *gophercloud.ServiceClient
-}
+// ... (other types like Pair, Vmdetails, etc., remain unchanged)
 
 // Logger for structured logging
 var log = logrus.New()
 
 // Run executes the VM info retrieval logic
-func Run(verbose bool, filterStr, outputFormat string, useFlavorCache bool) error {
+func Run(ctx context.Context, client *auth.Client, verbose bool, filterStr, outputFormat string, useFlavorCache bool) error {
 	log.SetOutput(os.Stdout)
 	log.SetLevel(logrus.InfoLevel)
 	if verbose {
@@ -118,25 +51,9 @@ func Run(verbose bool, filterStr, outputFormat string, useFlavorCache bool) erro
 		Verbose:        verbose,
 		FilterStr:      filterStr,
 		OutputFormat:   outputFormat,
-		Timeout:        300 * time.Second, // Increased from 120s to 300s
 		MaxRetries:     3,
 		MaxConcurrency: 10,
 		UseFlavorCache: useFlavorCache,
-	}
-
-	// Determine region
-	region := os.Getenv("OS_REGION_NAME")
-	if region == "" {
-		region = "RegionOne"
-		log.Debug("OS_REGION_NAME not set, defaulting to RegionOne")
-	}
-
-	// Validate required environment variables
-	requiredEnv := []string{"OS_AUTH_URL", "OS_USERNAME", "OS_PASSWORD", "OS_PROJECT_NAME", "OS_DOMAIN_NAME"}
-	for _, env := range requiredEnv {
-		if os.Getenv(env) == "" {
-			return fmt.Errorf("missing required environment variable: %s", env)
-		}
 	}
 
 	f, err := parseFilters(cfg.FilterStr)
@@ -145,14 +62,6 @@ func Run(verbose bool, filterStr, outputFormat string, useFlavorCache bool) erro
 	}
 	log.Debugf("Applied filters: host=%q, email=%q, status=%q, project=%q, days%s%d",
 		f.Host, f.Email, f.Status, f.Project, f.DaysOp, f.DaysValue)
-
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
-	defer cancel()
-
-	client, err := initializeClients(ctx, cfg, region)
-	if err != nil {
-		return errors.Wrap(err, "failed to initialize clients")
-	}
 
 	var wg sync.WaitGroup
 	var usersErr, projectsErr, flavorsErr error

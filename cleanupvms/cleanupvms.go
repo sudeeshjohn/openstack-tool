@@ -7,11 +7,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/gophercloud/gophercloud/v2"
-	"github.com/gophercloud/gophercloud/v2/openstack"
 	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/hypervisors"
 	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/servers"
 	"github.com/gophercloud/gophercloud/v2/openstack/identity/v3/projects"
+	"github.com/sudeeshjohn/openstack-tool/auth"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -29,15 +28,13 @@ type VM struct {
 }
 
 // Run executes the VM cleanup logic
-func Run(user, password, ip string, dryRun bool) error {
-	provider, err := authenticateOpenStack()
-	if err != nil {
-		return fmt.Errorf("error authenticating OpenStack: %v", err)
+func Run(ctx context.Context, client *auth.Client, user, password, ip string, dryRun bool) error {
+	region := os.Getenv("OS_REGION_NAME")
+	if region == "" {
+		return fmt.Errorf("OS_REGION_NAME not set")
 	}
-	if err := verifyOpenStackAuthentication(provider); err != nil {
-		return fmt.Errorf("authentication error: %v", err)
-	}
-	hypervisorsList, err := fetchHypervisorList(provider)
+
+	hypervisorsList, err := fetchHypervisorList(ctx, client)
 	if err != nil {
 		return fmt.Errorf("error fetching hypervisor list: %v", err)
 	}
@@ -52,7 +49,7 @@ func Run(user, password, ip string, dryRun bool) error {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		openstackInstances, errOpenStack = fetchOpenStackVMList(provider, hypervisorHostname)
+		openstackInstances, errOpenStack = fetchOpenStackVMList(ctx, client, hypervisorHostname, region)
 	}()
 	go func() {
 		defer wg.Done()
@@ -81,35 +78,8 @@ func Run(user, password, ip string, dryRun bool) error {
 	return nil
 }
 
-func authenticateOpenStack() (*gophercloud.ProviderClient, error) {
-	opts, err := openstack.AuthOptionsFromEnv()
-	if err != nil {
-		return nil, fmt.Errorf("failed to load auth options: %v", err)
-	}
-	provider, err := openstack.AuthenticatedClient(context.Background(), opts)
-	if err != nil {
-		return nil, fmt.Errorf("authentication failed: %v", err)
-	}
-	return provider, nil
-}
-
-func verifyOpenStackAuthentication(provider *gophercloud.ProviderClient) error {
-	opts := gophercloud.EndpointOpts{}
-	_, err := openstack.NewIdentityV3(provider, opts)
-	if err != nil {
-		return fmt.Errorf("failed to create identity v3 client: %v", err)
-	}
-	fmt.Println("✅ Identity V3 client created successfully!")
-	return nil
-}
-
-func fetchHypervisorList(provider *gophercloud.ProviderClient) ([]hypervisors.Hypervisor, error) {
-	computeClient, err := openstack.NewComputeV2(provider, gophercloud.EndpointOpts{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create compute client: %v", err)
-	}
-	ctx := context.Background()
-	allPages, err := hypervisors.List(computeClient, hypervisors.ListOpts{}).AllPages(ctx)
+func fetchHypervisorList(ctx context.Context, client *auth.Client) ([]hypervisors.Hypervisor, error) {
+	allPages, err := hypervisors.List(client.Compute, hypervisors.ListOpts{}).AllPages(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list hypervisors: %v", err)
 	}
@@ -120,33 +90,14 @@ func fetchHypervisorList(provider *gophercloud.ProviderClient) ([]hypervisors.Hy
 	return hypervisorsList, nil
 }
 
-func resolveHostname(ip string, hypervisorsList []hypervisors.Hypervisor) string {
-	for _, hypervisor := range hypervisorsList {
-		if hypervisor.HostIP == ip {
-			return hypervisor.HypervisorHostname
-		}
-	}
-	return ""
-}
-
-func fetchOpenStackVMList(provider *gophercloud.ProviderClient, hypervisorHostname string) ([]InstanceInfo, error) {
-	region := os.Getenv("OS_REGION_NAME")
-	if region == "" {
-		return nil, fmt.Errorf("OS_REGION_NAME not set")
-	}
-	client, err := openstack.NewComputeV2(provider, gophercloud.EndpointOpts{
-		Region: region,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create compute client: %v", err)
-	}
-	projectList, err := fetchAllProjects(provider)
+func fetchOpenStackVMList(ctx context.Context, client *auth.Client, hypervisorHostname, region string) ([]InstanceInfo, error) {
+	projectList, err := fetchAllProjects(ctx, client)
 	if err != nil {
 		return nil, fmt.Errorf("error fetching projects: %v", err)
 	}
 	var instanceNames []InstanceInfo
 	for _, project := range projectList {
-		instances, err := fetchVMsForProject(client, project, hypervisorHostname)
+		instances, err := fetchVMsForProject(ctx, client, project, hypervisorHostname)
 		if err != nil {
 			fmt.Printf("Error fetching VMs for project %s: %v\n", project.Name, err)
 			continue
@@ -162,13 +113,8 @@ func fetchOpenStackVMList(provider *gophercloud.ProviderClient, hypervisorHostna
 	return instanceNames, nil
 }
 
-func fetchAllProjects(provider *gophercloud.ProviderClient) ([]projects.Project, error) {
-	identityClient, err := openstack.NewIdentityV3(provider, gophercloud.EndpointOpts{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create identity client: %v", err)
-	}
-	ctx := context.Background()
-	allPages, err := projects.List(identityClient, projects.ListOpts{}).AllPages(ctx)
+func fetchAllProjects(ctx context.Context, client *auth.Client) ([]projects.Project, error) {
+	allPages, err := projects.List(client.Identity, projects.ListOpts{}).AllPages(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list projects: %v", err)
 	}
@@ -179,13 +125,12 @@ func fetchAllProjects(provider *gophercloud.ProviderClient) ([]projects.Project,
 	return projectList, nil
 }
 
-func fetchVMsForProject(client *gophercloud.ServiceClient, project projects.Project, hypervisorHostname string) ([]string, error) {
+func fetchVMsForProject(ctx context.Context, client *auth.Client, project projects.Project, hypervisorHostname string) ([]string, error) {
 	opts := servers.ListOpts{
 		AllTenants: true,
 		TenantID:   project.ID,
 	}
-	ctx := context.Background()
-	allPages, err := servers.List(client, opts).AllPages(ctx)
+	allPages, err := servers.List(client.Compute, opts).AllPages(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list servers: %v", err)
 	}
