@@ -119,12 +119,35 @@ func CreateVM(ctx context.Context) error {
 			return fmt.Errorf("get VM status: %v", err)
 		}
 		if server.Status == "ACTIVE" || server.Status == "ERROR" {
-			fmt.Printf("Current status: %s, Server IP: %s, waiting...\n", server.Status,server.AccessIPv4)
 			break
 		}
-		fmt.Printf("Current status: %s, Server IP: %s, waiting...\n", server.Status,server.AccessIPv4)
+		fmt.Printf("Current status: %s,  waiting...\n", server.Status)
 		time.Sleep(10 * time.Second)
 	}
+	var ipAddress string
+	server, err = servers.Get(ctx, computeClient, server.ID).Extract()
+	addresses := server.Addresses
+	for _, network := range addresses {
+		networkList, ok := network.([]interface{})
+		if !ok {
+			continue
+		}
+		for _, addr := range networkList {
+			addrMap, ok := addr.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if ip, ok := addrMap["addr"].(string); ok {
+				ip = strings.Split(ip, "%")[0]
+				ipAddress = ip
+				break
+			}
+		}
+		if ipAddress != "" {
+			break
+		}
+	}
+	fmt.Printf("IP ADDRESS IS: %s", ipAddress)
 	return nil
 }
 
@@ -412,7 +435,6 @@ func selectKeyPair(ctx context.Context, client *gophercloud.ServiceClient) strin
 	}
 	for retries := 0; retries < 3; retries++ {
 		idx := toChoice(prompt("Choose key pair (or enter 0 to skip): "), len(allKeypairs)+1)
-		fmt.Printf("IDX from KEYPAIR %d\n", idx)
 		if idx == -1 {
 			fmt.Printf("Invalid choice. %d retries left.\n", 2-retries)
 			continue
