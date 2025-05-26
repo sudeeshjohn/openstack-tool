@@ -76,7 +76,6 @@ func CreateVM(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("network client: %v", err)
 	}
-
 	// Interactive input
 	fmt.Println("==== OpenStack VM Creator ====")
 	name := prompt("Enter VM name: ")
@@ -104,7 +103,6 @@ func CreateVM(ctx context.Context) error {
 		CreateOptsBuilder: createOpts,
 		KeyName:           keypair,
 	}
-
 	fmt.Println("Creating VM...")
 	server, err := servers.Create(ctx, computeClient, createOptsExt, nil).Extract()
 	if err != nil {
@@ -121,11 +119,11 @@ func CreateVM(ctx context.Context) error {
 			return fmt.Errorf("get VM status: %v", err)
 		}
 		if server.Status == "ACTIVE" || server.Status == "ERROR" {
-			fmt.Printf("VM is now %s\n", server.Status)
+			fmt.Printf("Current status: %s, Server IP: %s, waiting...\n", server.Status,server.AccessIPv4)
 			break
 		}
-		fmt.Printf("Current status: %s, waiting...\n", server.Status)
-		time.Sleep(2 * time.Second)
+		fmt.Printf("Current status: %s, Server IP: %s, waiting...\n", server.Status,server.AccessIPv4)
+		time.Sleep(10 * time.Second)
 	}
 	return nil
 }
@@ -154,7 +152,7 @@ func toChoice(input string, max int) int {
 		fmt.Println("Invalid choice.")
 		return -1
 	}
-	return i - 1
+	return i
 }
 
 func selectProject(ctx context.Context, identityClient *gophercloud.ServiceClient) string {
@@ -172,9 +170,10 @@ func selectProject(ctx context.Context, identityClient *gophercloud.ServiceClien
 		fmt.Printf("%d) %s (%s)\n", i+1, p.Name, p.ID)
 	}
 	for retries := 0; retries < 3; retries++ {
-		idx := toChoice(prompt("Choose project: "), len(allProjects))
+		idx := toChoice(prompt("Choose project: "), len(allProjects)+1)
 		if idx >= 0 {
-			return allProjects[idx].ID
+			fmt.Printf("You Chose: %s\n", allProjects[idx-1].Name)
+			return allProjects[idx-1].ID
 		}
 		fmt.Printf("Invalid choice. %d retries left.\n", 2-retries)
 	}
@@ -224,7 +223,8 @@ func selectAvailabilityZone(ctx context.Context, client *gophercloud.ServiceClie
 		if idx == 0 {
 			return "" // Skip zone
 		}
-		return availableZones[idx].ZoneName
+		fmt.Printf("You Chose: %s\n", availableZones[idx-1].ZoneName)
+		return availableZones[idx-1].ZoneName
 	}
 	fmt.Println("❌ Too many invalid attempts. Exiting.")
 	os.Exit(1)
@@ -246,9 +246,10 @@ func selectImage(ctx context.Context, client *gophercloud.ServiceClient) string 
 		fmt.Printf("%d) %s\n", i+1, img.Name)
 	}
 	for retries := 0; retries < 3; retries++ {
-		idx := toChoice(prompt("Choose image: "), len(imgs))
+		idx := toChoice(prompt("Choose image: "), len(imgs)+1)
 		if idx >= 0 {
-			return imgs[idx].ID
+			fmt.Printf("You Chose: %s\n", imgs[idx-1].Name)
+			return imgs[idx-1].ID
 		}
 		fmt.Printf("Invalid choice. %d retries left.\n", 2-retries)
 	}
@@ -272,9 +273,10 @@ func selectFlavor(ctx context.Context, client *gophercloud.ServiceClient) string
 		fmt.Printf("%d) %s (%d vCPU, %dMB RAM)\n", i+1, fl.Name, fl.VCPUs, fl.RAM)
 	}
 	for retries := 0; retries < 3; retries++ {
-		idx := toChoice(prompt("Choose flavor: "), len(allFlavors))
+		idx := toChoice(prompt("Choose flavor: "), len(allFlavors)+1)
 		if idx >= 0 {
-			return allFlavors[idx].ID
+			fmt.Printf("You Chose: %s\n", allFlavors[idx-1].Name)
+			return allFlavors[idx-1].ID
 		}
 		fmt.Printf("Invalid choice. %d retries left.\n", 2-retries)
 	}
@@ -298,9 +300,10 @@ func selectNetwork(ctx context.Context, client *gophercloud.ServiceClient) strin
 		fmt.Printf("%d) %s (%s)\n", i+1, net.Name, net.ID)
 	}
 	for retries := 0; retries < 3; retries++ {
-		idx := toChoice(prompt("Choose network: "), len(nets))
+		idx := toChoice(prompt("Choose network: "), len(nets)+1)
 		if idx >= 0 {
-			return nets[idx].ID
+			fmt.Printf("You Chose: %s\n", nets[idx-1].Name)
+			return nets[idx-1].ID
 		}
 		fmt.Printf("Invalid choice. %d retries left.\n", 2-retries)
 	}
@@ -380,7 +383,8 @@ func selectComputeHost(ctx context.Context, client *gophercloud.ServiceClient, z
 		if idx == 0 {
 			return "" // Skip host which will pick any host from the availability zone
 		}
-		return hosts[idx].HypervisorHostname
+		fmt.Printf("You Chose: %s\n", hosts[idx-1].HypervisorHostname)
+		return hosts[idx-1].HypervisorHostname
 	}
 	fmt.Println("❌ Too many invalid attempts. Exiting.")
 	os.Exit(1)
@@ -408,6 +412,7 @@ func selectKeyPair(ctx context.Context, client *gophercloud.ServiceClient) strin
 	}
 	for retries := 0; retries < 3; retries++ {
 		idx := toChoice(prompt("Choose key pair (or enter 0 to skip): "), len(allKeypairs)+1)
+		fmt.Printf("IDX from KEYPAIR %d\n", idx)
 		if idx == -1 {
 			fmt.Printf("Invalid choice. %d retries left.\n", 2-retries)
 			continue
@@ -415,6 +420,7 @@ func selectKeyPair(ctx context.Context, client *gophercloud.ServiceClient) strin
 		if idx == 0 {
 			return ""
 		}
+		fmt.Printf("You chose: %s\n", allKeypairs[idx-1].Name)
 		return allKeypairs[idx-1].Name
 	}
 	fmt.Println("❌ Too many invalid attempts. Exiting.")
