@@ -52,6 +52,14 @@ func main() {
 	roleName := userRolesCmd.String("role", "", "Role name")
 	userTimeout := userRolesCmd.Int("timeout", 300, "Timeout in seconds for API operations")
 
+	vmCreateCmd := pflag.NewFlagSet("vm create", pflag.ExitOnError)
+	createVerbose := vmCreateCmd.Bool("verbose", false, "Enable verbose logging")
+	createTimeout := vmCreateCmd.Int("timeout", 300, "Timeout in seconds for API operations")
+
+	createCmd := pflag.NewFlagSet("create", pflag.ExitOnError)
+	createCmdVerbose := createCmd.Bool("verbose", false, "Enable verbose logging")
+	createCmdTimeout := createCmd.Int("timeout", 300, "Timeout in seconds for API operations")
+
 	volumeCmd := pflag.NewFlagSet("volume", pflag.ExitOnError)
 	volumeCmd.Usage = func() {
 		fmt.Println("Usage: openstack-tool volume <subcommand> [flags]")
@@ -135,7 +143,7 @@ func main() {
 	switch os.Args[1] {
 	case "vm":
 		if len(os.Args) < 3 {
-			fmt.Println("Error: 'vm' subcommand requires 'info' or 'manage' action")
+			fmt.Println("Error: 'vm' subcommand requires 'info', 'manage', or 'create' action")
 			printUsage()
 			os.Exit(1)
 		}
@@ -207,8 +215,26 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+		case "create":
+			vmCreateCmd.Parse(os.Args[3:])
+			authVerbose = *createVerbose
+			timeoutDuration := time.Duration(*createTimeout) * time.Second
+			ctx, cancel := context.WithTimeout(context.Background(), timeoutDuration)
+			defer cancel()
+			authClient, err = auth.NewClient(ctx, auth.Config{
+				Verbose: authVerbose,
+				Timeout: timeoutDuration,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Authentication error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := vm.CreateVM(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		default:
-			fmt.Printf("Error: invalid subcommand '%s' for 'vm'; expected 'info' or 'manage'\n", os.Args[2])
+			fmt.Printf("Error: invalid subcommand '%s' for 'vm'; expected 'info', 'manage', or 'create'\n", os.Args[2])
 			printUsage()
 			os.Exit(1)
 		}
@@ -393,6 +419,24 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
+	case "create":
+		createCmd.Parse(os.Args[2:])
+		authVerbose = *createCmdVerbose
+		timeoutDuration := time.Duration(*createCmdTimeout) * time.Second
+		ctx, cancel := context.WithTimeout(context.Background(), timeoutDuration)
+		defer cancel()
+		authClient, err = auth.NewClient(ctx, auth.Config{
+			Verbose: authVerbose,
+			Timeout: timeoutDuration,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Authentication error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := vm.CreateVM(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		fmt.Printf("Error: unknown subcommand '%s'\n", os.Args[1])
 		printUsage()
@@ -405,9 +449,10 @@ func printUsage() {
 	fmt.Println("Usage: openstack-tool <subcommand> [flags]")
 	fmt.Println("\nSubcommands:")
 	fmt.Println("  vm")
-	fmt.Println("    Subcommands: info, manage")
+	fmt.Println("    Subcommands: info, manage, create")
 	fmt.Println("    Example: openstack-tool vm info --verbose --filter=\"host=host1,status=ACTIVE,days>7\" --output=json --timeout=300")
 	fmt.Println("    Example: openstack-tool vm manage delete --vm=test-vm1,test-vm2 --project=admin --dry-run --output=table --timeout=300")
+	fmt.Println("    Example: openstack-tool vm create --verbose --timeout=300")
 	fmt.Println("  clean-nova-stale-vms")
 	fmt.Println("    Clean stale VMs on a hypervisor")
 	fmt.Println("    Example: openstack-tool clean-nova-stale-vms --verbose --user=root --password=secret --ip=192.168.1.100 --dry-run --output=table --timeout=300")
@@ -425,6 +470,9 @@ func printUsage() {
 	fmt.Println("    Manage storage volumes on Storage")
 	fmt.Println("    Subcommands: vol")
 	fmt.Println("    Example: openstack-tool storage vol list --ip=192.168.1.100 --username=admin --password=secret --long --timeout=300")
+	fmt.Println("  create")
+	fmt.Println("    Interactively create a new VM")
+	fmt.Println("    Example: openstack-tool create --verbose --timeout=300")
 	fmt.Println("\nEnvironment Variables:")
 	fmt.Println("  OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_PROJECT_NAME, OS_DOMAIN_NAME, OS_REGION_NAME")
 }

@@ -1,4 +1,4 @@
-.PHONY: all build test fmt lint run run-get-vminfo run-clean-nova-stale-vms run-user-roles run-manage-vms run-volume run-volume-list run-images run-images-list run-storage run-storage-vol-list clean install-lint deps
+.PHONY: all build test fmt lint run run-get-vminfo run-clean-nova-stale-vms run-user-roles run-manage-vms run-volume run-volume-list run-images run-images-list run-storage run-storage-vol-list run-vm-create run-create clean install-lint deps
 
 all: build
 
@@ -14,7 +14,7 @@ test:
 	go tool cover -html=coverage.out -o coverage.html
 
 fmt:
-	gofmt -w getvminfo/*.go cleannovastalevms/*.go user/*.go auth/*.go managevms/*.go util/*.go volume/*.go images/*.go storage/*.go main.go
+	gofmt -w getvminfo/*.go cleannovastalevms/*.go user/*.go auth/*.go managevms/*.go util/*.go volume/*.go images/*.go storage/*.go vm/*.go main.go
 
 install-lint:
 	@command -v golangci-lint >/dev/null 2>&1 || { \
@@ -57,6 +57,12 @@ run-storage: build
 
 run-storage-vol-list: build
 	./openstack-tool storage vol list --verbose --ip=192.168.1.100 --username=admin --password=secret --long --timeout=300
+
+run-vm-create: build
+	./openstack-tool vm create --verbose --timeout=300
+
+run-create: build
+	./openstack-tool create --verbose --timeout=300
 
 clean:
 	rm -f openstack-tool
